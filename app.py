@@ -246,6 +246,7 @@ class CertificateValidator:
             "approved_by": "approved by",
             "temperature": "temperature during test",
             "humidity": "humidity during test"
+            
         }
         
         Return ONLY the JSON, no other text.
@@ -341,7 +342,7 @@ class CertificateValidator:
             ('Range', 'Range'),
             ('Least count', 'Least Count'),
             ('Unique Identity No.', 'Unique ID'),
-            ('Instrument / Equipment / Software (Sr. No.)', 'Serial Number'),
+            ('Serial Number', 'Serial Number'),
             ('Cal Date', 'Calibration Date'),
             ('Due Date', 'Due Date'),
             ('User Location', 'Location'),
@@ -359,7 +360,7 @@ class CertificateValidator:
                 extracted_value = cert_details.get('instrument_description', '')
             elif db_field == 'Make' and cert_details.get('manufacturer'):
                 extracted_value = cert_details.get('manufacturer', '')
-            elif db_field == 'Instrument / Equipment / Software (Sr. No.)' and cert_details.get('serial_no'):
+            elif db_field == 'Serial Number' and cert_details.get('serial_no'):
                 extracted_value = cert_details.get('serial_no', '')
             elif db_field == 'Unique Identity No.' and cert_details.get('identification_no'):
                 extracted_value = cert_details.get('identification_no', '')
@@ -459,7 +460,7 @@ def process_single_pdf(validator, pdf_file) -> List[Dict]:
                     'cert_details': cert_details,
                     'instrument': master_record.get('Instrument', 'N/A'),
                     'make': master_record.get('Make', 'N/A'),
-                    'serial_no': master_record.get('Instrument / Equipment / Software (Sr. No.)', 'N/A'),
+                    'serial_no': master_record.get('Serial Number', 'N/A'),
                     'cal_date': master_record.get('Cal Date', 'N/A'),
                     'due_date': due_date,
                     'expiry_status': expiry['status'],
@@ -545,7 +546,7 @@ def generate_expiry_excel_report(master_df: pd.DataFrame, report_type: str) -> b
                         'Certificate No': row.get(cert_col, '') if cert_col else '',
                         'Instrument': row.get('Instrument', ''),
                         'Make': row.get('Make', ''),
-                        'Serial No': row.get('Instrument / Equipment / Software (Sr. No.)', ''),
+                        'Serial No': row.get('Serial Number', ''),
                         'Due Date': due.strftime('%Y-%m-%d'),
                         'Days Overdue': abs(days_left),
                         'Location': row.get('User Location', '')
@@ -556,7 +557,7 @@ def generate_expiry_excel_report(master_df: pd.DataFrame, report_type: str) -> b
                         'Certificate No': row.get(cert_col, '') if cert_col else '',
                         'Instrument': row.get('Instrument', ''),
                         'Make': row.get('Make', ''),
-                        'Serial No': row.get('Instrument / Equipment / Software (Sr. No.)', ''),
+                        'Serial No': row.get('Serial Number', ''),
                         'Due Date': due.strftime('%Y-%m-%d'),
                         'Days Left': days_left,
                         'Status': status,
@@ -641,7 +642,7 @@ def main():
                         'Certificate No': row.get(cert_col, '') if cert_col else '',
                         'Instrument': row.get('Instrument', ''),
                         'Make': row.get('Make', ''),
-                        'Serial No': row.get('Instrument / Equipment / Software (Sr. No.)', ''),
+                        'Serial No': row.get('Serial Number', ''),
                         'Due Date': due_date.strftime('%Y-%m-%d'),
                         'Days Left': days_left,
                         'Location': row.get('User Location', '')
