@@ -98,6 +98,130 @@ class CertificateValidator:
                 return col
         return None
     
+    def normalize_text(self, text: str) -> str:
+        """Normalize text for comparison (remove extra spaces, special chars, convert to lowercase)"""
+        if not text or pd.isna(text):
+            return ""
+        text = str(text).strip().lower()
+        text = re.sub(r'\s+', ' ', text)
+        text = re.sub(r'[°%]', '', text)
+        return text
+    
+    def normalize_date(self, date_str) -> Optional[str]:
+        """Normalize date to YYYY-MM-DD format for comparison"""
+        if pd.isna(date_str) or not date_str:
+            return None
+        try:
+            date_str = str(date_str).strip()
+            
+            # Remove time part if present (e.g., "2026-03-02 00:00:00" -> "2026-03-02")
+            if ' ' in date_str and '-' in date_str:
+                date_str = date_str.split(' ')[0]
+            
+            # Already in YYYY-MM-DD
+            if re.match(r'\d{4}-\d{2}-\d{2}', date_str):
+                return date_str
+            
+            # Try different formats
+            formats = [
+                '%d-%b-%y',      # 01-Mar-26
+                '%d-%b-%Y',      # 01-Mar-2026
+                '%d/%m/%Y',      # 01/03/2026
+                '%d/%m/%y',      # 01/03/26
+                '%d-%m-%Y',      # 01-03-2026
+                '%d %B %Y',      # 01 March 2026
+                '%B %d, %Y',     # March 01, 2026
+                '%B %d %Y',      # March 01 2026
+                '%Y-%m-%d',      # 2026-03-01
+            ]
+            
+            for fmt in formats:
+                try:
+                    parsed = datetime.strptime(date_str, fmt)
+                    return parsed.strftime('%Y-%m-%d')
+                except:
+                    continue
+            
+            # Last resort
+            parsed = pd.to_datetime(date_str)
+            return parsed.strftime('%Y-%m-%d')
+        except:
+            return None
+    
+    def compare_range(self, extracted: str, master: str) -> bool:
+        """Compare range values intelligently"""
+        if not extracted or not master or pd.isna(master):
+            return False
+        
+        extracted = str(extracted).lower().strip()
+        master = str(master).lower().strip()
+        
+        # Extract all numbers from both strings
+        extracted_numbers = re.findall(r'\d+', extracted)
+        master_numbers = re.findall(r'\d+', master)
+        
+        # If both have the same set of numbers, consider it a match
+        if extracted_numbers and master_numbers:
+            if set(extracted_numbers) == set(master_numbers):
+                return True
+        
+        # Remove spaces, slashes, and common separators
+        extracted_clean = re.sub(r'[\s/]', '', extracted)
+        master_clean = re.sub(r'[\s/]', '', master)
+        
+        return extracted_clean == master_clean
+    
+    def compare_least_count(self, extracted: str, master: str) -> bool:
+        """Compare least count/resolution values intelligently"""
+        if not extracted or not master or pd.isna(master):
+            return False
+        
+        extracted = str(extracted).lower().strip()
+        master = str(master).lower().strip()
+        
+        # Extract numbers
+        extracted_numbers = re.findall(r'(\d+(?:\.\d+)?)', extracted)
+        master_numbers = re.findall(r'(\d+(?:\.\d+)?)', master)
+        
+        # Extract units
+        extracted_units = re.findall(r'[a-z]+', extracted)
+        master_units = re.findall(r'[a-z]+', master)
+        
+        # Normalize units: amper/ampere -> a, volt -> v
+        def normalize_units(units):
+            normalized = []
+            for u in units:
+                u = re.sub(r'amper|ampere', 'a', u)
+                u = re.sub(r'volt', 'v', u)
+                normalized.append(u)
+            return normalized
+        
+        extracted_units_norm = normalize_units(extracted_units)
+        master_units_norm = normalize_units(master_units)
+        
+        # Check if numbers match (ignoring order)
+        numbers_match = False
+        if extracted_numbers and master_numbers:
+            if sorted(extracted_numbers) == sorted(master_numbers):
+                numbers_match = True
+        
+        # Check if units match (ignoring order)
+        units_match = False
+        if extracted_units_norm and master_units_norm:
+            if sorted(extracted_units_norm) == sorted(master_units_norm):
+                units_match = True
+        
+        # Check if the values are swapped (e.g., "20A/1V" vs "1V/20A")
+        extracted_pairs = list(zip(extracted_numbers, extracted_units_norm)) if len(extracted_numbers) == len(extracted_units_norm) else []
+        master_pairs = list(zip(master_numbers, master_units_norm)) if len(master_numbers) == len(master_units_norm) else []
+        
+        pairs_match = False
+        if extracted_pairs and master_pairs:
+            if sorted(extracted_pairs) == sorted(master_pairs):
+                pairs_match = True
+        
+        return numbers_match and (units_match or pairs_match)
+    
     def pdf_to_images(self, pdf_file) -> list:
         images = []
         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
@@ -137,7 +261,6 @@ class CertificateValidator:
             return None
     
     def extract_certificate_details(self, image) -> Dict[str, Any]:
-        """Extract ALL certificate details from the page"""
         prompt = """
         You are analyzing a calibration certificate page. Extract ALL visible information.
         
@@ -181,20 +304,16 @@ class CertificateValidator:
             return {}
     
     def process_pdf_pages(self, pdf_file) -> List[Dict]:
-        """Process PDF pages and group them into certificates (no duplicates)"""
-        
         images = self.pdf_to_images(pdf_file)
         if not images:
             return []
         
-        # First, find which pages have certificate numbers (start of a certificate)
         page_certificates = []
         
         for i, img in enumerate(images):
             cert_num = self.extract_certificate_number(img)
             if cert_num and cert_num not in self.processed_certs:
                 self.processed_certs.add(cert_num)
-                # Extract full details from the first page of this certificate
                 cert_details = self.extract_certificate_details(img)
                 page_certificates.append({
                     'page_num': i + 1,
@@ -221,7 +340,12 @@ class CertificateValidator:
             return {'status': 'No Date', 'color': 'gray', 'days_left': None, 'message': 'No due date'}
         
         try:
-            due = pd.to_datetime(due_date).date()
+            normalized = self.normalize_date(due_date)
+            if normalized:
+                due = datetime.strptime(normalized, '%Y-%m-%d').date()
+            else:
+                due = pd.to_datetime(due_date).date()
+            
             today = datetime.now().date()
             days_left = (due - today).days
             
@@ -233,15 +357,14 @@ class CertificateValidator:
                 return {'status': 'EXPIRING SOON', 'color': 'orange', 'days_left': days_left, 'message': f'Expires in {days_left} days'}
             else:
                 return {'status': 'VALID', 'color': 'green', 'days_left': days_left, 'message': f'Valid - {days_left} days left'}
-        except:
-            return {'status': 'Invalid Date', 'color': 'gray', 'days_left': None, 'message': 'Invalid date format'}
+        except Exception as e:
+            return {'status': 'Invalid Date', 'color': 'gray', 'days_left': None, 'message': f'Invalid date: {due_date}'}
     
     def create_comparison_table(self, cert_details: Dict, master_record: pd.Series) -> pd.DataFrame:
         """Create a full comparison table between certificate and master record"""
         
         comparisons = []
         
-        # Master DB fields
         master_fields = [
             ('Sl No', 'Sl No'),
             ('Instrument', 'Instrument'),
@@ -264,7 +387,6 @@ class CertificateValidator:
             master_value = master_record.get(db_field, '')
             master_display = str(master_value) if pd.notna(master_value) else '❌ Not in DB'
             
-            # Try to find matching extracted value
             extracted_value = ''
             if db_field == 'Instrument' and cert_details.get('instrument_description'):
                 extracted_value = cert_details.get('instrument_description', '')
@@ -287,18 +409,55 @@ class CertificateValidator:
             
             extracted_display = extracted_value if extracted_value else '❌ Not in Certificate'
             
-            # Check if they match
-            if extracted_value and master_value and pd.notna(master_value):
-                if str(extracted_value).strip().lower() == str(master_value).strip().lower():
-                    status = '✅ Match'
+            # ============ INTELLIGENT COMPARISON ============
+            
+            # Special handling for Range
+            if db_field == 'Range':
+                is_match = self.compare_range(extracted_value, master_value)
+                status = '✅ Match' if is_match else '❌ Mismatch'
+            
+            # Special handling for Least Count
+            elif db_field == 'Least count':
+                is_match = self.compare_least_count(extracted_value, master_value)
+                status = '✅ Match' if is_match else '❌ Mismatch'
+            
+            # Special handling for Dates
+            elif db_field in ['Cal Date', 'Due Date']:
+                extracted_date = self.normalize_date(extracted_value)
+                master_date = self.normalize_date(master_value)
+                
+                if extracted_date and master_date:
+                    if extracted_date == master_date:
+                        status = '✅ Match'
+                    else:
+                        status = '❌ Mismatch'
+                elif extracted_value and master_value:
+                    # Try direct string comparison after cleaning
+                    extracted_clean = re.sub(r'[^\w\s]', '', str(extracted_value).lower())
+                    master_clean = re.sub(r'[^\w\s]', '', str(master_value).lower())
+                    if extracted_clean == master_clean:
+                        status = '✅ Match'
+                    else:
+                        status = '⚠️ Date format issue'
                 else:
-                    status = '❌ Mismatch'
-            elif extracted_value and (not master_value or pd.isna(master_value)):
-                status = '⚠️ Missing in Master DB'
-            elif (not extracted_value) and master_value and pd.notna(master_value):
-                status = '⚠️ Missing in Certificate'
+                    status = '⚪ Missing'
+            
+            # Default comparison with normalization
             else:
-                status = '⚪ Both Missing'
+                extracted_normalized = self.normalize_text(extracted_value)
+                master_normalized = self.normalize_text(master_value)
+                
+                if extracted_value and master_value and pd.notna(master_value):
+                    if extracted_normalized == master_normalized:
+                        status = '✅ Match'
+                    else:
+                        status = '❌ Mismatch'
+                elif extracted_value and (not master_value or pd.isna(master_value)):
+                    status = '⚠️ Missing in Master DB'
+                elif (not extracted_value) and master_value and pd.notna(master_value):
+                    status = '⚠️ Missing in Certificate'
+                else:
+                    status = '⚪ Both Missing'
             
             comparisons.append({
                 'Field': display_name,
@@ -307,9 +466,9 @@ class CertificateValidator:
                 'Status': status
             })
         
-        # Add Certificate Details section
+        # Certificate Details section
         if cert_details:
-            comparisons.append({'Field': '--- CERTIFICATE DETAILS ---', 'Extracted from Certificate': '---', 'Master Database': '---', 'Status': '---'})
+            comparisons.append({'Field': '--- ADDITIONAL CERTIFICATE INFO ---', 'Extracted from Certificate': '---', 'Master Database': '---', 'Status': '---'})
             
             cert_detail_fields = [
                 ('customer_name', 'Customer Name'),
@@ -332,13 +491,12 @@ class CertificateValidator:
                         'Field': display_name,
                         'Extracted from Certificate': value,
                         'Master Database': 'Not in Master DB',
-                        'Status': 'ℹ️ Certificate Info'
+                        'Status': 'ℹ️ Extra Info'
                     })
         
         return pd.DataFrame(comparisons)
 
 def process_single_pdf(validator, pdf_file) -> List[Dict]:
-    """Process a single PDF and return all UNIQUE certificates found"""
     try:
         certificates = validator.process_pdf_pages(pdf_file)
         results = []
@@ -446,7 +604,17 @@ def generate_expiry_excel_report(master_df: pd.DataFrame, report_type: str) -> b
         due_date = row.get('Due Date')
         if pd.notna(due_date):
             try:
-                due = pd.to_datetime(due_date).date()
+                if isinstance(due_date, str):
+                    try:
+                        due = datetime.strptime(due_date, '%d-%b-%y').date()
+                    except:
+                        try:
+                            due = datetime.strptime(due_date, '%Y-%m-%d').date()
+                        except:
+                            due = pd.to_datetime(due_date).date()
+                else:
+                    due = pd.to_datetime(due_date).date()
+                
                 days_left = (due - today).days
                 
                 if report_type == 'expired' and days_left < 0:
@@ -455,7 +623,7 @@ def generate_expiry_excel_report(master_df: pd.DataFrame, report_type: str) -> b
                         'Instrument': row.get('Instrument', ''),
                         'Make': row.get('Make', ''),
                         'Serial No': row.get('Instrument / Equipment / Software (Sr. No.)', ''),
-                        'Due Date': due_date,
+                        'Due Date': due.strftime('%Y-%m-%d'),
                         'Days Overdue': abs(days_left),
                         'Location': row.get('User Location', '')
                     })
@@ -466,7 +634,7 @@ def generate_expiry_excel_report(master_df: pd.DataFrame, report_type: str) -> b
                         'Instrument': row.get('Instrument', ''),
                         'Make': row.get('Make', ''),
                         'Serial No': row.get('Instrument / Equipment / Software (Sr. No.)', ''),
-                        'Due Date': due_date,
+                        'Due Date': due.strftime('%Y-%m-%d'),
                         'Days Left': days_left,
                         'Status': status,
                         'Location': row.get('User Location', '')
@@ -506,7 +674,6 @@ def main():
         st.header("OfficeFlowAI")
         st.image("OfficeFlow Ai-01-01.png", width=120)
         
-        
         st.divider()
         
         st.header("📊 Master Database")
@@ -531,7 +698,6 @@ def main():
         st.info("👈 Please upload the master Excel file first")
         return
     
-    # Reset processed certificates for new session
     if st.session_state.validator:
         st.session_state.validator.processed_certs = set()
     
@@ -553,7 +719,17 @@ def main():
             due = row.get(due_col)
             if pd.notna(due):
                 try:
-                    due_date = pd.to_datetime(due).date()
+                    if isinstance(due, str):
+                        try:
+                            due_date = datetime.strptime(due, '%d-%b-%y').date()
+                        except:
+                            try:
+                                due_date = datetime.strptime(due, '%Y-%m-%d').date()
+                            except:
+                                due_date = pd.to_datetime(due).date()
+                    else:
+                        due_date = pd.to_datetime(due).date()
+                    
                     days_left = (due_date - today).days
                     
                     record = {
@@ -616,15 +792,12 @@ def main():
     st.divider()
     
     # ==================== EXPIRY TABLES ====================
-    # Display Expired Certificates Table
     if expired_list:
         st.subheader("🔴 Expired Certificates")
-        expired_df = pd.DataFrame(expired_list)
-        st.dataframe(expired_df, use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(expired_list), use_container_width=True, hide_index=True)
     else:
         st.info("✅ No expired certificates found")
     
-    # Display Critical Certificates Table
     if critical_list:
         st.subheader("🔴 Critical - Expiring in 1-7 Days")
         critical_df = pd.DataFrame(critical_list)
@@ -633,7 +806,6 @@ def main():
     else:
         st.info("✅ No certificates expiring in 1-7 days")
     
-    # Display Warning Certificates Table
     if warning_list:
         st.subheader("🟠 Warning - Expiring in 8-30 Days")
         warning_df = pd.DataFrame(warning_list)
@@ -642,7 +814,6 @@ def main():
     else:
         st.info("✅ No certificates expiring in 8-30 days")
     
-    # Display Info Certificates Table
     if info_list:
         st.subheader("🟡 Info - Expiring in 31-60 Days")
         info_df = pd.DataFrame(info_list)
@@ -730,25 +901,52 @@ def main():
                 
                 status_text.text("✅ Processing complete!")
                 
-                # Display results summary
                 st.subheader("📊 Results Summary")
-                
+
                 results_data = []
                 for r in all_results:
+                    # Get days remaining
+                    days_left = r.get('days_left')
+                    expiry_status = r.get('expiry_status', 'N/A')
+                    
+                    # Format days remaining display
+                    if days_left is not None:
+                        if days_left < 0:
+                            days_display = f"🔴 {days_left} days"
+                            expiry_display = f"{expiry_status}"
+                        elif days_left == 0:
+                            days_display = f"🔴 0 days"
+                            expiry_display = f"{expiry_status}"
+                        elif days_left <= 7:
+                            days_display = f"{days_left} days"
+                            expiry_display = f"🔴 {expiry_status}"
+                        elif days_left <= 30:
+                            days_display = f"🟠 {days_left} days"
+                            expiry_display = f"{expiry_status}"
+                        elif days_left <= 60:
+                            days_display = f"🟡 {days_left} days"
+                            expiry_display = f"{expiry_status}"
+                        else:
+                            days_display = f"🟢 {days_left} days"
+                            expiry_display = f"{expiry_status}"
+                    else:
+                        days_display = 'N/A'
+                        expiry_display = '⚪ No Date'
+                    
                     results_data.append({
                         'File': r['filename'],
                         'Certificate No': r.get('certificate_number', 'N/A'),
                         'Page': r.get('page_num', 'N/A'),
                         'Status': '✅ Found' if r.get('found_in_master') else '❌ Not Found',
-                        'Expiry': r.get('expiry_status', ''),
+                        'Expiry Status': expiry_display,
+                        'Days Remaining': days_display,
                         'Instrument': r.get('instrument', ''),
                         'Due Date': r.get('due_date', '')
                     })
-                
+                                
                 results_df = pd.DataFrame(results_data)
                 st.dataframe(results_df, use_container_width=True, hide_index=True)
                 
-                # Download button
                 excel_data = generate_batch_excel_report(all_results)
                 st.download_button(
                     label="📥 Download Complete Report (Excel)",
@@ -758,7 +956,6 @@ def main():
                     use_container_width=True
                 )
                 
-                # Show detailed results for found certificates
                 found_results = [r for r in all_results if r.get('found_in_master')]
                 if found_results:
                     st.subheader("📋 Detailed Comparison Results")
